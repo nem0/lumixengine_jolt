@@ -1,5 +1,4 @@
-project "jolt"
-	libType()
+if plugin "jolt" then
 	files { 
 		"external/Jolt/**.c",
 		"external/Jolt/**.cpp",
@@ -12,7 +11,5 @@ project "jolt"
 	}
 	includedirs { "external/" }
 	defines { "BUILDING_JOLT" }
-	links { "engine" }
-	defaultConfigurations()
-
-linkPlugin("jolt")
+	dynamic_link_plugin { "engine" }
+end
