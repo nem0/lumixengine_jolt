@@ -28,6 +28,12 @@
 
 namespace Lumix {
 
+enum class JoltVersion : i32 {
+	MESHES,
+
+	LATEST
+};
+
 static const ComponentType JOLT_BODY_TYPE = reflection::getComponentType("jolt_body");
 static const ComponentType JOLT_BOX_TYPE = reflection::getComponentType("jolt_box");
 static const ComponentType JOLT_MESH_TYPE = reflection::getComponentType("jolt_mesh");
@@ -210,7 +216,14 @@ struct JoltModuleImpl : JoltModule {
 		}
 	}
 
+	i32 getVersion() const override { return (i32)JoltVersion::LATEST; }
+
 	void deserialize(struct InputMemoryStream& serializer, const struct EntityMap& entity_map, i32 version) override {
+		if (version <= (i32)JoltVersion::MESHES) {
+			const u32 num = serializer.read<u32>();
+			ASSERT(num == 0);
+			return;
+		}
 		u32 num_bodies;
 		serializer.read(num_bodies);
 		for (u32 i = 0; i < num_bodies; ++i) {
