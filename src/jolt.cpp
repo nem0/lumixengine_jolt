@@ -8,6 +8,7 @@
 #include <Jolt/Physics/Collision/Shape/CompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/MutableCompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
+#include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/RegisterTypes.h>
 
@@ -18,14 +19,19 @@
 #include "core/string.h"
 #include "engine/engine.h"
 #include "engine/plugin.h"
+#include "engine/resource_manager.h"
 #include "engine/reflection.h"
 #include "engine/world.h"
 #include "imgui/IconsFontAwesome5.h"
 #include "jolt_module.h"
+#include "renderer/model.h"
 
 namespace Lumix {
 
 static const ComponentType JOLT_BODY_TYPE = reflection::getComponentType("jolt_body");
+static const ComponentType JOLT_BOX_TYPE = reflection::getComponentType("jolt_box");
+static const ComponentType JOLT_MESH_TYPE = reflection::getComponentType("jolt_mesh");
+static const ComponentType JOLT_SPHERE_TYPE = reflection::getComponentType("jolt_sphere");
 
 namespace BroadPhaseLayers
 {
@@ -117,12 +123,28 @@ struct JoltJobSystemProxy : JPH::JobSystemWithBarrier {
 };
 
 struct JoltModuleImpl : JoltModule {
+	struct MeshShape {
+		JPH::Ref<JPH::MeshShape> shape;
+		Model* model = nullptr;
+	};
+
+	struct Body {
+		JPH::EMotionType motion_type = JPH::EMotionType::Static;
+		JPH::ObjectLayer layer = Layers::NON_MOVING;
+		JPH::Body* body = nullptr;
+		JPH::Ref<JPH::Shape> shape;
+	};
+
 	JoltModuleImpl(Engine& engine, ISystem& system, World& world, IAllocator& allocator)
 		: m_engine(engine)
 		, m_system(system)
 		, m_world(world)
 		, m_allocator(allocator)
 		, m_bodies(m_allocator)
+		, m_boxes(m_allocator)
+		, m_meshes(m_allocator)
+		, m_spheres(m_allocator)
+		, m_callbacks_ref_count(m_allocator)
 		, m_temp_allocator(10 * 1024 * 1024)
 	{
 		const u32 MAX_BODIES = 1024;
@@ -142,6 +164,10 @@ struct JoltModuleImpl : JoltModule {
 		return {v.x, v.y, v.z};
 	}
 
+	static JPH::Quat toJPH(const Quat& v) {
+		return {v.x, v.y, v.z, v.w};
+	}
+
 	static Vec3 toLumix(const JPH::Vec3& v) {
 		return {v.GetX(), v.GetY(), v.GetZ()};
 	}
@@ -156,132 +182,155 @@ struct JoltModuleImpl : JoltModule {
 		serializer.write(m_bodies.size());
 		for (auto iter = m_bodies.begin(); iter.isValid(); ++iter) {
 			serializer.write(iter.key());
-			JPH::Body* body = iter.value().body;
-			if (!body) {
-				serializer.write(JPH::EShapeType::Empty);
-				continue;
-			}
-			auto* compound = (JPH::CompoundShape*)body->GetShape();
-			serializer.write(compound->GetType());
-			serializer.write(body->GetMotionType());
-			serializer.write(body->GetObjectLayer());
-			serializer.write(compound->GetSubType());
+			const Body& body = iter.value();
+			serializer.write(body.motion_type);
+			serializer.write(body.layer);
+		}
 
-			const u32 num_sub_shapes = compound->GetNumSubShapes();
-			serializer.write(num_sub_shapes);
-					
-			for (JPH::uint j = 0; j < num_sub_shapes; ++j) {
-				const JPH::CompoundShape::SubShape& sub_shape = compound->GetSubShape(j);
-				const JPH::Shape* sub_shape_ptr = sub_shape.mShape;
-				
-				JPH::Vec3 inner_pos = {0, 0, 0};
-				JPH::Quat inner_rot = JPH::Quat::sIdentity();
-				
-				auto* rot_trans_shape = (const JPH::RotatedTranslatedShape*)sub_shape_ptr;
-				inner_pos = rot_trans_shape->GetPosition();
-				inner_rot = rot_trans_shape->GetRotation();
-				sub_shape_ptr = rot_trans_shape->GetInnerShape();
-				
-				serializer.write(sub_shape_ptr->GetType());
-				serializer.write(sub_shape_ptr->GetSubType());
-				
-				serializer.write(toLumix(inner_pos));
-				serializer.write(toLumix(inner_rot));
-				
-				switch (sub_shape_ptr->GetType()) {
-					case JPH::EShapeType::Convex:
-						switch (sub_shape_ptr->GetSubType()) {
-							case JPH::EShapeSubType::Sphere: {
-								auto* sphere = (JPH::SphereShape*)sub_shape_ptr;
-								const float radius = sphere->GetRadius();
-								serializer.write(radius);
-								break;
-							}
-							case JPH::EShapeSubType::Box: {
-								auto* box = (JPH::BoxShape*)sub_shape_ptr;
-								const JPH::Vec3 size = box->GetHalfExtent();
-								serializer.write(toLumix(size));
-								break;
-							}
-							default: ASSERT(false); break;
-						}
-						break;
-					default: ASSERT(false); break;
-				}
-			}
+		serializer.write(m_boxes.size());
+		for (auto iter = m_boxes.begin(); iter.isValid(); ++iter) {
+			serializer.write(iter.key());
+			const JPH::Ref<JPH::BoxShape>& box = iter.value();
+			const Vec3 half_extents = toLumix(box->GetHalfExtent());
+			serializer.write(half_extents);
+		}
+
+		serializer.write(m_spheres.size());
+		for (auto iter = m_spheres.begin(); iter.isValid(); ++iter) {
+			serializer.write(iter.key());
+			const float radius = iter.value()->GetRadius();
+			serializer.write(radius);
+		}
+
+		serializer.write(m_meshes.size());
+		for (auto iter = m_meshes.begin(); iter.isValid(); ++iter) {
+			serializer.write(iter.key());
+			const MeshShape& m = iter.value();
+			serializer.writeString(m.model ? m.model->getPath().c_str() : "");
 		}
 	}
 
 	void deserialize(struct InputMemoryStream& serializer, const struct EntityMap& entity_map, i32 version) override {
-		const u32 num = serializer.read<u32>();
-		JPH::BodyInterface& body_interface = m_jolt_system.GetBodyInterface();
-		for (u32 i = 0; i < num; ++i) {
-			EntityRef entity = serializer.read<EntityRef>();
-			entity = entity_map.get(entity);
-			Body& body = m_bodies.insert(entity);
-			m_world.onComponentCreated(entity, JOLT_BODY_TYPE, this);
+		u32 num_bodies;
+		serializer.read(num_bodies);
+		for (u32 i = 0; i < num_bodies; ++i) {
+			EntityRef e;
+			serializer.read(e);
+			const EntityRef mapped = entity_map.get(e);
+			createBody(mapped);
+			Body& body = m_bodies[mapped];
 
-			const JPH::EShapeType type = serializer.read<JPH::EShapeType>();
-			if (type == JPH::EShapeType::Empty) continue;
+			serializer.read(body.motion_type);
+			serializer.read(body.layer);
+		}
 
-			const JPH::EMotionType motion_type = serializer.read<JPH::EMotionType>();
-			const JPH::ObjectLayer layer = serializer.read<JPH::ObjectLayer>();
-			const JPH::EShapeSubType subtype = serializer.read<JPH::EShapeSubType>();
-			const DVec3 pos = m_world.getPosition(entity);
+		u32 num_boxes;
+		serializer.read(num_boxes);
+		for (u32 i = 0; i < num_boxes; ++i) {
+			EntityRef e;
+			serializer.read(e);
+			Vec3 he;
+			serializer.read(he);
 
-			ASSERT(type == JPH::EShapeType::Compound);
-			const u32 num_sub_shapes = serializer.read<u32>();
-			JPH::MutableCompoundShapeSettings css;
+			const EntityRef mapped = entity_map.get(e);
+			createBox(mapped);
+			m_boxes[mapped] = new JPH::BoxShape(toJPH(he));
+		}
 
-			for (JPH::uint j = 0; j < num_sub_shapes; ++j) {
-				const JPH::EShapeType sub_shape_type = serializer.read<JPH::EShapeType>();
-				const JPH::EShapeSubType sub_shape_subtype = serializer.read<JPH::EShapeSubType>();
+		u32 num_spheres;
+		serializer.read(num_spheres);
+		for (u32 i = 0; i < num_spheres; ++i) {
+			EntityRef e;
+			serializer.read(e);
+			float radius;
+			serializer.read(radius);
 
-				Vec3 inner_position = serializer.read<Vec3>();
-				Quat inner_rotation = serializer.read<Quat>();
+			const EntityRef mapped = entity_map.get(e);
+			createSphere(mapped);
+			m_spheres[mapped] = new JPH::SphereShape(radius);
+		}
 
-				JPH::Ref<JPH::Shape> sub_shape;
-				switch (sub_shape_type) {
-					case JPH::EShapeType::Convex:
-						switch (sub_shape_subtype) {
-							case JPH::EShapeSubType::Box: {
-								const Vec3 size = serializer.read<Vec3>();
-								sub_shape = new JPH::BoxShape({size.x, size.y, size.z});
-								break;
-							}
-							case JPH::EShapeSubType::Sphere: {
-								const float radius = serializer.read<float>();
-								sub_shape = new JPH::SphereShape(radius);
-								break;
-							}
-							default: ASSERT(false); break;
-						}
-						break;
-					default: ASSERT(false); break;
-				}
-				
-				JPH::Vec3 jph_inner_pos(inner_position.x, inner_position.y, inner_position.z);
-				JPH::Quat jph_inner_rot(inner_rotation.x, inner_rotation.y, inner_rotation.z, inner_rotation.w);
-				sub_shape = new JPH::RotatedTranslatedShape(jph_inner_pos, jph_inner_rot, sub_shape);
-				
-				css.AddShape({0, 0, 0}, JPH::Quat::sIdentity(), sub_shape);
-			}
-			
-			JPH::ShapeSettings::ShapeResult result = css.Create();
-			ASSERT(result.IsValid());
-			body.shape = result.Get();
-			
-			JPH::BodyCreationSettings bcs(body.shape, {(float)pos.x, (float)pos.y, (float)pos.z}, JPH::Quat::sIdentity(), motion_type, layer);
-			body.body = m_jolt_system.GetBodyInterface().CreateBody(bcs);
-			body.body->SetUserData(entity.index);
-			body_interface.AddBody(body.body->GetID(), JPH::EActivation::Activate);
+		u32 mesh_count;
+		serializer.read(mesh_count);
+		ResourceManagerHub& rm = m_engine.getResourceManager();
+		for (u32 i = 0; i < mesh_count; ++i) {
+			EntityRef e;
+			serializer.read(e);
+
+			Path path(serializer.readString());
+
+			const EntityRef mapped = entity_map.get(e);
+			auto iter = m_meshes.insert(mapped, {});
+			setMeshPath(mapped, path);
+			m_world.onComponentCreated(mapped, JOLT_MESH_TYPE, this);
 		}
 	}
 
 	ISystem& getSystem() const override { return m_system; }
 	World& getWorld() override { return m_world; }
+
+	void createJoltBody(Body& body, EntityRef entity) {
+		JPH::MutableCompoundShapeSettings css;
+
+		auto box_iter = m_boxes.find(entity);
+		auto sphere_iter = m_spheres.find(entity);
+		auto mesh_iter = m_meshes.find(entity);
+		if (box_iter.isValid()) css.AddShape({0, 0, 0}, {0, 0, 0, 1}, box_iter.value());
+		if (sphere_iter.isValid()) css.AddShape({0, 0, 0}, {0, 0, 0, 1}, sphere_iter.value());
+		if (mesh_iter.isValid() && mesh_iter.value().shape.GetPtr()) css.AddShape({0, 0, 0}, {0, 0, 0, 1}, mesh_iter.value().shape); 
+		for (EntityPtr c = m_world.getFirstChild(entity); c.isValid(); c = m_world.getNextSibling((EntityRef)c)) {
+			EntityRef child = *c;
+			box_iter = m_boxes.find(child);
+			sphere_iter = m_spheres.find(child);
+			mesh_iter = m_meshes.find(child);
+			if (box_iter.isValid()) {
+				const Transform local_tr = m_world.getLocalTransform(child);
+				css.AddShape(toJPH(Vec3(local_tr.pos)), toJPH(local_tr.rot), box_iter.value());
+			}
+			if (sphere_iter.isValid()) {
+				const Transform local_tr = m_world.getLocalTransform(child);
+				css.AddShape(toJPH(Vec3(local_tr.pos)), toJPH(local_tr.rot), sphere_iter.value());
+			}
+			if (mesh_iter.isValid() && mesh_iter.value().model && mesh_iter.value().model->isReady()) {
+				MeshShape& shape = mesh_iter.value();
+				if (!shape.shape) createJoltMesh(shape);
+				const Transform local_tr = m_world.getLocalTransform(child);
+				css.AddShape(toJPH(Vec3(local_tr.pos)), toJPH(local_tr.rot), mesh_iter.value().shape);
+			}
+		}
+
+		JPH::ShapeSettings::ShapeResult result = css.Create();
+		if (!result.IsValid()) {
+			ASSERT(false);
+			return;
+		}
+
+		body.shape = result.Get();
+
+		const DVec3 pos = m_world.getPosition(entity);
+		JPH::BodyCreationSettings bcs(
+			body.shape,
+			{(float)pos.x, (float)pos.y, (float)pos.z},
+			JPH::Quat::sIdentity(),
+			body.motion_type,
+			body.layer
+		);
+
+		JPH::BodyInterface& bi = m_jolt_system.GetBodyInterface();
+		body.body = bi.CreateBody(bcs);
+		body.body->SetUserData(entity.index);
+		bi.AddBody(body.body->GetID(), JPH::EActivation::Activate);		
+	}
 	
-	void startGame() { m_is_game_running = true; }
+	void startGame() {
+		m_is_game_running = true;
+		for (auto iter = m_bodies.begin(); iter.isValid(); ++iter) {
+			EntityRef body_entity = iter.key();
+			Body& body = iter.value();
+			createJoltBody(body, body_entity);
+		}
+	}
+
 	void stopGame() { m_is_game_running = false; }
 
 	void update(float time_delta) override {
@@ -321,193 +370,192 @@ struct JoltModuleImpl : JoltModule {
 		m_bodies.insert(entity, {});
 		m_world.onComponentCreated(entity, JOLT_BODY_TYPE, this);
 	}
-	
-	void addShape(EntityRef entity, u32 idx, JPH::Shape* shape) {
-		Body& body = m_bodies[entity];
-		const DVec3 pos = m_world.getPosition(entity);
-		
-		JPH::EMotionType motion_type = JPH::EMotionType::Dynamic;
-		JPH::ObjectLayer layer = Layers::NON_MOVING;
-		JPH::BodyInterface& body_interface = m_jolt_system.GetBodyInterface();
-		
-		if (body.body) {
-			motion_type = body.body->GetMotionType();
-			layer = body.body->GetObjectLayer();
+
+	void setSphereRadius(EntityRef entity, float radius) override {
+		JPH::Ref<JPH::SphereShape> new_sphere = new JPH::SphereShape(radius);
+		m_spheres[entity] = new_sphere;
+		EntityPtr body_entity = getBodyEntity(entity);
+		if (body_entity) recreateJoltBody(*body_entity);
+	}
+
+	float getSphereRadius(EntityRef entity) const override {
+		return m_spheres[entity]->GetRadius();
+	}
+
+	void setBoxHalfExtents(EntityRef entity, Vec3 half_extents) override {
+		JPH::Ref<JPH::BoxShape> new_box = new JPH::BoxShape(toJPH(half_extents));
+		m_boxes[entity] = new_box;
+		EntityPtr body_entity = getBodyEntity(entity);
+		if (body_entity) recreateJoltBody(*body_entity);
+	}
+
+	Path getMeshPath(EntityRef entity) {
+		const MeshShape& shape = m_meshes[entity];
+		if (shape.model) return shape.model->getPath();
+		return {};
+	}
+
+	void createJoltMesh(JoltModuleImpl::MeshShape& shape) {
+		if (!shape.model) return;
+		if (!shape.model->isReady()) return;
+
+		JPH::VertexList vertices;
+		JPH::IndexedTriangleList triangles;
+		u32 index_offset = 0;
+		for (u32 mesh_idx = 0; mesh_idx < (u32)shape.model->getMeshCount(); ++mesh_idx) {
+			const Mesh& mesh = shape.model->getMesh(mesh_idx);
+			const u32 num_vertex = mesh.vertices.size();
+			const u32 num_index = mesh.indices_count;
+			if (num_vertex == 0 || num_index < 3) continue;
 			
+			vertices.reserve(vertices.size() + num_vertex);
+			
+			const Vec3* positions = (const Vec3*)mesh.vertices.begin();
+			for (u32 i = 0; i < num_vertex; ++i) {
+				JPH::Float3& v = vertices.emplace_back();
+				v.x = positions[i].x;
+				v.y = positions[i].y;
+				v.z = positions[i].z;
+			}
+			
+			triangles.reserve(triangles.size() + num_index / 3);
+
+			if (mesh.areIndices16()) {
+				const u16* indices = (const u16*)mesh.indices.data();
+				for (u32 i = 0; i + 2 < num_index; i += 3) {
+					triangles.push_back(JPH::IndexedTriangle(index_offset + indices[i], index_offset + indices[i + 1], index_offset + indices[i + 2]));
+				}
+			} else {
+				const u32* indices = (const u32*)mesh.indices.data();
+				for (u32 i = 0; i + 2 < num_index; i += 3) {
+					triangles.push_back(JPH::IndexedTriangle(index_offset + indices[i], index_offset + indices[i + 1], index_offset + indices[i + 2]));
+				}
+			}
+
+			index_offset += num_vertex;
+		}
+
+		JPH::Ref<JPH::MeshShapeSettings> settings = new JPH::MeshShapeSettings(vertices, triangles);
+		JPH::ShapeSettings::ShapeResult result = settings->Create();
+		if (!result.IsValid()) return;
+
+		shape.shape = (JPH::MeshShape*)result.Get().GetPtr();
+	}
+
+	void onModelStateChanged(Resource::State old_state, Resource::State new_state, Resource& resource) {
+		if (old_state != Resource::State::READY && new_state == Resource::State::READY) {
+			for (MeshShape& shape : m_meshes) {
+				if (shape.model != &resource) continue;
+
+				createJoltMesh(shape);
+			}
+		}
+	}
+
+	void setMeshPath(EntityRef entity, const Path& path) {
+		MeshShape& shape = m_meshes[entity];
+		if (shape.model) {
+			auto cb_iter = m_callbacks_ref_count.find(shape.model);
+			--cb_iter.value();
+			if (cb_iter.value() == 0) {
+				shape.model->getObserverCb().unbind<&JoltModuleImpl::onModelStateChanged>(this);
+				m_callbacks_ref_count.erase(cb_iter);
+			}
+			shape.model->decRefCount();
+		}
+		shape.shape = nullptr;
+		shape.model = path.isEmpty() ? nullptr : m_engine.getResourceManager().load<Model>(path);
+
+		if (shape.model) {
+			auto cb_iter = m_callbacks_ref_count.find(shape.model);
+			if (cb_iter.isValid()) ++cb_iter.value();
+			else {
+				m_callbacks_ref_count.insert(shape.model, 1);
+				shape.model->getObserverCb().bind<&JoltModuleImpl::onModelStateChanged>(this);
+			}
+
+			if (shape.model->isReady()) {
+				createJoltMesh(shape);
+			}
+		}
+
+		if (!shape.model || shape.model->isReady()) {
+			EntityPtr body_entity = getBodyEntity(entity);
+			if (body_entity) recreateJoltBody(*body_entity);
+		}
+	}
+
+	EntityPtr getBodyEntity(EntityRef shape_entity) {
+		if (m_bodies.find(shape_entity).isValid()) return shape_entity;
+		
+		EntityPtr parent = m_world.getParent(shape_entity);
+		if (!parent.isValid()) return INVALID_ENTITY;
+		if (m_bodies.find(*parent).isValid()) return parent;
+		return INVALID_ENTITY;
+	}
+
+	void recreateJoltBody(EntityRef entity) {
+		if (!m_is_game_running) return;
+
+		Body& body = m_bodies[entity];
+
+		if (body.body) {
+			JPH::BodyInterface& body_interface = m_jolt_system.GetBodyInterface();
 			body_interface.RemoveBody(body.body->GetID());
 			body_interface.DestroyBody(body.body->GetID());
 		}
-
-		JPH::MutableCompoundShapeSettings css;
-		JPH::Ref<JPH::Shape> wrapped_shape = new JPH::RotatedTranslatedShape({0, 0, 0}, JPH::Quat::sIdentity(), shape);
-		css.AddShape({0, 0, 0}, JPH::Quat::sIdentity(), wrapped_shape);
-
-		if (body.shape) {
-			const JPH::CompoundShape* compound = (const JPH::CompoundShape*)body.shape.GetPtr();
-			for (JPH::uint i = 0; i < compound->GetNumSubShapes(); ++i) {
-				const JPH::CompoundShape::SubShape& sub_shape = compound->GetSubShape(i);
-				css.AddShape(sub_shape.GetPositionCOM(), sub_shape.GetRotation(), sub_shape.mShape);
-			}
-		}
-
-		JPH::ShapeSettings::ShapeResult result = css.Create();
-		ASSERT(result.IsValid());
-		body.shape = result.Get();
-
-		JPH::BodyCreationSettings bcs(body.shape, {(float)pos.x, (float)pos.y, (float)pos.z}, JPH::Quat::sIdentity(), motion_type, layer);
-		body.body = body_interface.CreateBody(bcs);
-		body.body->SetUserData(entity.index);
-		body_interface.AddBody(body.body->GetID(), JPH::EActivation::Activate);
+		
+		createJoltBody(body, entity);
 	}
 
-	void addBoxShape(EntityRef entity, u32 idx) {
-		JPH::Ref<JPH::Shape> box_shape = new JPH::BoxShape({1, 1, 1});
-		addShape(entity, idx, box_shape);
+	void destroyMesh(EntityRef entity) {
+		auto iter = m_meshes.find(entity);
+		if (!iter.isValid()) return;
+
+		EntityPtr body_entity = getBodyEntity(entity);
+		if (body_entity.isValid()) recreateJoltBody(*body_entity);
+
+		m_meshes.erase(entity);
+		m_world.onComponentDestroyed(entity, JOLT_MESH_TYPE, this);
 	}
 
-	void addSphereShape(EntityRef entity, u32 idx) {
-		JPH::Ref<JPH::Shape> sphere_shape = new JPH::SphereShape(1);
-		addShape(entity, idx, sphere_shape);
+	void destroyBox(EntityRef entity) {
+		auto iter = m_boxes.find(entity);
+		if (!iter.isValid()) return;
+
+		EntityPtr body_entity = getBodyEntity(entity);
+		if (body_entity.isValid()) recreateJoltBody(*body_entity);
+
+		m_boxes.erase(entity);
+		m_world.onComponentDestroyed(entity, JOLT_BOX_TYPE, this);
 	}
 
-	void removeBoxShape(EntityRef entity, u32 idx) {
-		removeShape(entity, idx, JPH::EShapeSubType::Box);
+	void destroySphere(EntityRef entity) {
+		auto iter = m_spheres.find(entity);
+		if (!iter.isValid()) return;
+
+		EntityPtr body_entity = getBodyEntity(entity);
+		if (body_entity.isValid()) recreateJoltBody(*body_entity);
+
+		m_spheres.erase(entity);
+		m_world.onComponentDestroyed(entity, JOLT_SPHERE_TYPE, this);
 	}
 
-	void removeSphereShape(EntityRef entity, u32 idx) {
-		removeShape(entity, idx, JPH::EShapeSubType::Sphere);
+	void createSphere(EntityRef entity) {
+		m_spheres.insert(entity, new JPH::SphereShape(1));
+		m_world.onComponentCreated(entity, JOLT_SPHERE_TYPE, this);
 	}
 
-	void removeShape(EntityRef entity, u32 idx, JPH::EShapeSubType type) {
-		Body& body = m_bodies[entity];
-		ASSERT(body.shape.GetPtr());
-		ASSERT(body.body);
-		
-		const DVec3 pos = m_world.getPosition(entity);
-		
-		JPH::EMotionType motion_type = body.body->GetMotionType();
-		JPH::ObjectLayer layer = body.body->GetObjectLayer();
-		
-		JPH::BodyInterface& body_interface = m_jolt_system.GetBodyInterface();
-		body_interface.RemoveBody(body.body->GetID());
-		body_interface.DestroyBody(body.body->GetID());
-		
-		const JPH::CompoundShape* compound = (const JPH::CompoundShape*)body.shape.GetPtr();
-		JPH::MutableCompoundShapeSettings css;
-		
-		u32 num_shapes_of_type = 0;
-		for (JPH::uint i = 0; i < compound->GetNumSubShapes(); ++i) {
-			const JPH::CompoundShape::SubShape& sub_shape = compound->GetSubShape(i);
-			
-			const JPH::Shape* inner_shape = sub_shape.mShape;
-			auto* rot_trans_shape = (const JPH::RotatedTranslatedShape*)inner_shape;
-			inner_shape = rot_trans_shape->GetInnerShape();
-			
-			if (inner_shape->GetSubType() == type) {
-				if (num_shapes_of_type != idx) {
-					css.AddShape(sub_shape.GetPositionCOM(), sub_shape.GetRotation(), sub_shape.mShape);
-				}
-				num_shapes_of_type++;
-			} else {
-				css.AddShape(sub_shape.GetPositionCOM(), sub_shape.GetRotation(), sub_shape.mShape);
-			}
-		}
-		
-		if (css.mSubShapes.size() > 0) {
-			JPH::ShapeSettings::ShapeResult result = css.Create();
-			ASSERT(result.IsValid());
-			body.shape = result.Get();
-			
-			JPH::BodyCreationSettings bcs(body.shape, {(float)pos.x, (float)pos.y, (float)pos.z}, JPH::Quat::sIdentity(), motion_type, layer);
-			body.body = body_interface.CreateBody(bcs);
-			body.body->SetUserData(entity.index);
-			body_interface.AddBody(body.body->GetID(), JPH::EActivation::Activate);
-		} else {
-			body.shape = nullptr;
-			body.body = nullptr;
-		}
+	void createMesh(EntityRef entity) {
+		m_meshes.insert(entity, {});
+		m_world.onComponentCreated(entity, JOLT_MESH_TYPE, this);
 	}
 
-	void setSphereRadius(EntityRef entity, u32 idx, float radius) {
-		JPH::Ref<JPH::Shape> new_sphere = new JPH::SphereShape(radius);
-		replaceShape(entity, idx, new_sphere);
+	void createBox(EntityRef entity) {
+		m_boxes.insert(entity, new JPH::BoxShape({1, 1, 1}));
+		m_world.onComponentCreated(entity, JOLT_BOX_TYPE, this);
 	}
-
-	void replaceShape(EntityRef entity, u32 idx, JPH::Shape* new_shape) {
-		const JPH::EShapeSubType type = new_shape->GetSubType();
-		Body& body = m_bodies[entity];
-		ASSERT(body.shape);
-		ASSERT(body.body);
-		
-		const DVec3 pos = m_world.getPosition(entity);
-		JPH::EMotionType motion_type = body.body->GetMotionType();
-		JPH::ObjectLayer layer = body.body->GetObjectLayer();
-		
-		JPH::BodyInterface& body_interface = m_jolt_system.GetBodyInterface();
-		body_interface.RemoveBody(body.body->GetID());
-		body_interface.DestroyBody(body.body->GetID());
-		
-		const JPH::CompoundShape* compound = (const JPH::CompoundShape*)body.shape.GetPtr();
-		JPH::MutableCompoundShapeSettings css;
-		
-		u32 num = 0;
-		for (JPH::uint i = 0; i < compound->GetNumSubShapes(); ++i) {
-			const JPH::CompoundShape::SubShape& sub_shape = compound->GetSubShape(i);
-			
-			const JPH::Shape* inner_shape = sub_shape.mShape;
-			JPH::Vec3 inner_pos = {0, 0, 0};
-			JPH::Quat inner_rot = JPH::Quat::sIdentity();
-			
-			auto* rot_trans_shape = (const JPH::RotatedTranslatedShape*)inner_shape;
-			inner_shape = rot_trans_shape->GetInnerShape();
-			inner_pos = rot_trans_shape->GetPosition();
-			inner_rot = rot_trans_shape->GetRotation();
-			
-			if (inner_shape->GetSubType() == type) {
-				if (num == idx) {
-					JPH::Ref<JPH::Shape> wrapped_new_shape = new JPH::RotatedTranslatedShape(inner_pos, inner_rot, new_shape);
-					css.AddShape(sub_shape.GetPositionCOM(), sub_shape.GetRotation(), wrapped_new_shape);
-				} else {
-					css.AddShape(sub_shape.GetPositionCOM(), sub_shape.GetRotation(), sub_shape.mShape);
-				}
-				num++;
-			} else {
-				css.AddShape(sub_shape.GetPositionCOM(), sub_shape.GetRotation(), sub_shape.mShape);
-			}
-		}
-		
-		JPH::ShapeSettings::ShapeResult result = css.Create();
-		ASSERT(result.IsValid());
-		body.shape = result.Get();
-		
-		JPH::BodyCreationSettings bcs(body.shape, {(float)pos.x, (float)pos.y, (float)pos.z}, JPH::Quat::sIdentity(), motion_type, layer);
-		body.body = body_interface.CreateBody(bcs);
-		body.body->SetUserData(entity.index);
-		body_interface.AddBody(body.body->GetID(), JPH::EActivation::Activate);		
-	}
-
-	float getSphereRadius(EntityRef entity, u32 idx) const override {
-		const JPH::RotatedTranslatedShape* shape = getShape(entity, JPH::EShapeSubType::Sphere, idx);
-		auto* sphere = (const JPH::SphereShape*)shape->GetInnerShape();
-		return sphere->GetRadius();
-	}
-
-	Vec3 getSphereOffsetPosition(EntityRef entity, u32 idx) const override {
-		const JPH::RotatedTranslatedShape* shape = getShape(entity, JPH::EShapeSubType::Sphere, idx);
-		return toLumix(shape->GetPosition());
-	}
-
-	void setSphereOffsetPosition(EntityRef entity, u32 idx, const Vec3& pos) {
-		const JPH::RotatedTranslatedShape* shape = getShape(entity, JPH::EShapeSubType::Sphere, idx);
-		const JPH::Quat rotation = shape->GetRotation();
-		replaceShapeTransform(entity, idx, toJPH(pos), rotation, JPH::EShapeSubType::Sphere);
-	}
-
-	void setBoxHalfExtents(EntityRef entity, u32 idx, Vec3 half_extents) {
-		JPH::Ref<JPH::Shape> new_box = new JPH::BoxShape(toJPH(half_extents));
-		replaceShape(entity, idx, new_box);
-	}
-
+	
 	const JPH::RotatedTranslatedShape* getShape(EntityRef entity, JPH::EShapeSubType type, u32 idx) const {
 		const Body& body = m_bodies[entity];
 		ASSERT(body.shape.GetPtr());
@@ -532,11 +580,6 @@ struct JoltModuleImpl : JoltModule {
 		}
 		
 		return nullptr;
-	}
-
-	Quat getBoxOffsetRotationQuat(EntityRef entity, u32 idx) const override {
-		const JPH::RotatedTranslatedShape* shape = getShape(entity, JPH::EShapeSubType::Box, idx);
-		return toLumix(shape->GetRotation());
 	}
 
 	void replaceShapeTransform(EntityRef entity, u32 idx, const JPH::Vec3& pos, const JPH::Quat& rot, JPH::EShapeSubType type) {
@@ -592,54 +635,19 @@ struct JoltModuleImpl : JoltModule {
 		replaceShapeTransform(entity, idx, toJPH(pos), rotation, JPH::EShapeSubType::Box);
 	}
 
-	Vec3 getBoxOffsetPosition(EntityRef entity, u32 idx) const override {
-		const JPH::RotatedTranslatedShape* shape = getShape(entity, JPH::EShapeSubType::Box, idx);
-		return toLumix(shape->GetPosition());
-	}
-
-	Vec3 getBoxHalfExtents(EntityRef entity, u32 idx) const override {
-		const JPH::RotatedTranslatedShape* shape = getShape(entity, JPH::EShapeSubType::Box, idx);
-		auto* box = (const JPH::BoxShape*)shape->GetInnerShape();
-		return toLumix(box->GetHalfExtent());
-	}
-
-	u32 getShapeCount(EntityRef entity, JPH::EShapeSubType type) const {
-		const Body& body = m_bodies[entity];
-		if (!body.shape) return 0;
-
-		const JPH::CompoundShape* compound = (const JPH::CompoundShape*)body.shape.GetPtr();
-		u32 num = 0;
-		for (JPH::uint i = 0; i < compound->GetNumSubShapes(); ++i) {
-			const JPH::CompoundShape::SubShape& sub_shape = compound->GetSubShape(i);
-			
-			const JPH::Shape* inner_shape = sub_shape.mShape;
-			auto* rot_trans_shape = (const JPH::RotatedTranslatedShape*)inner_shape;
-			inner_shape = rot_trans_shape->GetInnerShape();
-			
-			if (inner_shape->GetSubType() == type) {
-				++num;
-			}
-		}
-		return num;
-	}
-
-	u32 getBoxShapeCount(EntityRef entity) const override {
-		return getShapeCount(entity, JPH::EShapeSubType::Box);
-	}
-	
-	u32 getSphereShapeCount(EntityRef entity) const override {
-		return getShapeCount(entity, JPH::EShapeSubType::Sphere);
+	Vec3 getBoxHalfExtents(EntityRef entity) const override {
+		return toLumix(m_boxes[entity]->GetHalfExtent());
 	}
 
 	JPH::ObjectLayer getLayer(EntityRef entity) {
 		const Body& body = m_bodies[entity];
-		if (!body.body) return Layers::NON_MOVING;
-
-		return body.body->GetObjectLayer();
+		return body.layer;
 	}
 
 	void setLayer(EntityRef entity, JPH::ObjectLayer new_layer) {
 		Body& body = m_bodies[entity];
+		body.layer = new_layer;
+		
 		if (!body.body) return;
 		if (body.body->GetObjectLayer() == new_layer) return;
 		
@@ -659,17 +667,14 @@ struct JoltModuleImpl : JoltModule {
 	}
 
 	void setDynamicType(EntityRef entity, JPH::EMotionType type) {
-		const Body& body = m_bodies[entity];
-		if (!body.body) return;
-
-		body.body->SetMotionType(type);
+		Body& body = m_bodies[entity];
+		body.motion_type = type;
+		if (body.body) body.body->SetMotionType(type);
 	}
 
 	JPH::EMotionType getDynamicType(EntityRef entity) {
 		const Body& body = m_bodies[entity];
-		if (!body.body) return JPH::EMotionType::Static;
-
-		return body.body->GetMotionType();
+		return body.motion_type;
 	}
 
 	static void reflect() {
@@ -700,19 +705,18 @@ struct JoltModuleImpl : JoltModule {
 		};
 
 		LUMIX_MODULE(JoltModuleImpl, "jolt")
+			.LUMIX_CMP(Box, "jolt_box", "Jolt / Box")
+				.icon(ICON_FA_BOX)
+				.LUMIX_PROP(BoxHalfExtents, "Half extents")
+			.LUMIX_CMP(Sphere, "jolt_sphere", "Jolt / Sphere")
+				.icon(ICON_FA_GLOBE)
+				.LUMIX_PROP(SphereRadius, "Radius")
+			.LUMIX_CMP(Mesh, "jolt_mesh", "Jolt / Mesh")
+				.LUMIX_PROP(MeshPath, "Path").resourceAttribute(Model::TYPE)
 			.LUMIX_CMP(Body, "jolt_body", "Jolt / Body")
 				.icon(ICON_FA_VOLLEYBALL_BALL)
 				.LUMIX_ENUM_PROP(DynamicType, "Dynamic").attribute<DynamicTypeEnum>()
 				.LUMIX_ENUM_PROP(Layer, "Layer").attribute<LayerEnum>()
-				.begin_array<&JoltModuleImpl::getBoxShapeCount, &JoltModuleImpl::addBoxShape, &JoltModuleImpl::removeBoxShape>("Box shapes")	
-					.LUMIX_PROP(BoxHalfExtents, "Half extents")
-					.LUMIX_PROP(BoxOffsetPosition, "Position offset")
-					//.LUMIX_PROP(BoxGeomOffsetRotation, "Rotation offset").radiansAttribute()
-				.end_array()
-				.begin_array<&JoltModuleImpl::getSphereShapeCount, &JoltModuleImpl::addSphereShape, &JoltModuleImpl::removeSphereShape>("Sphere shapes")
-					.LUMIX_PROP(SphereRadius, "Radius").minAttribute(0)
-					.LUMIX_PROP(SphereOffsetPosition, "Position offset")
-				.end_array()
 			/*.LUMIX_FUNC_EX(JoltModuleImpl::putToSleep, "putToSleep")
 			.LUMIX_FUNC_EX(JoltModuleImpl::getActorSpeed, "getSpeed")
 			.LUMIX_FUNC_EX(JoltModuleImpl::getActorVelocity, "getVelocity")
@@ -721,7 +725,6 @@ struct JoltModuleImpl : JoltModule {
 			.LUMIX_FUNC_EX(JoltModuleImpl::addForceAtPos, "addForceAtPos")
 			.LUMIX_PROP(IsTrigger, "Trigger")
 			.LUMIX_PROP(RigidActorCCD, "CCD")
-			.LUMIX_PROP(MeshGeomPath, "Mesh").resourceAttribute(PhysicsGeometry::TYPE)
 			.LUMIX_PROP(RigidActorMaterial, "Material").resourceAttribute(PhysicsMaterial::TYPE)
 			*/
 			;
@@ -741,12 +744,11 @@ struct JoltModuleImpl : JoltModule {
 	JPH::PhysicsSystem m_jolt_system;
 	bool m_is_game_running = false;
 
-	struct Body {
-		JPH::Body* body = nullptr;
-		JPH::Ref<JPH::Shape> shape;
-	};
-
 	HashMap<EntityRef, Body> m_bodies;
+	HashMap<EntityRef, JPH::Ref<JPH::BoxShape>> m_boxes;
+	HashMap<EntityRef, MeshShape> m_meshes;
+	HashMap<EntityRef, JPH::Ref<JPH::SphereShape>> m_spheres;
+	HashMap<Model*, u32> m_callbacks_ref_count;
 };
 
 
@@ -765,6 +767,20 @@ struct JoltSystem : ISystem {
 		JPH::Factory::sInstance = new JPH::Factory();
 		JPH::RegisterTypes();
 		JoltModuleImpl::reflect();
+	}
+
+	~JoltSystem() {
+		JPH::UnregisterTypes();
+		delete JPH::Factory::sInstance;
+		JPH::Factory::sInstance = nullptr;
+
+		JPH::AlignedAllocate = nullptr;
+		JPH::AlignedFree = nullptr;
+		JPH::Allocate = nullptr;
+		JPH::Reallocate = nullptr;
+		JPH::Free = nullptr;
+
+		s_allocator = nullptr;
 	}
 
 	static void* jph_reallocate(void *mem, size_t old_size, size_t new_size) {
