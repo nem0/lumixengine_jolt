@@ -12,6 +12,7 @@
 namespace Lumix {
 
 static const ComponentType JOLT_BOX_TYPE = reflection::getComponentType("jolt_box");
+static const ComponentType JOLT_SPHERE_TYPE = reflection::getComponentType("jolt_sphere");
 
 struct StudioAppPlugin : StudioApp::IPlugin {
 	void init() override {}
@@ -87,20 +88,30 @@ struct StudioAppPlugin : StudioApp::IPlugin {
 	}
 
 	bool showGizmo(struct WorldView& view, ComponentUID cmp) override {
-		if (cmp.type != JOLT_BOX_TYPE) return false;
+		if (cmp.type == JOLT_SPHERE_TYPE) {
+			auto* module = (JoltModule*)cmp.module;
+			const Transform tr = module->getWorld().getTransform(*cmp.entity);
+			const float radius = module->getSphereRadius(*cmp.entity);
+			addSphere(view, tr.pos, radius, Color::GREEN);
+			return true;
+		}
 
-		auto* module = (JoltModule*)cmp.module;
-		const Transform tr = module->getWorld().getTransform(*cmp.entity);
-		const Vec3 half = module->getBoxHalfExtents(*cmp.entity);
+		if (cmp.type == JOLT_BOX_TYPE) {
+			auto* module = (JoltModule*)cmp.module;
+			const Transform tr = module->getWorld().getTransform(*cmp.entity);
+			const Vec3 half = module->getBoxHalfExtents(*cmp.entity);
 
-		addCube(view
-			, tr.pos
-			, tr.rot.rotate(Vec3(half.x, 0, 0))
-			, tr.rot.rotate(Vec3(0, half.y, 0))
-			, tr.rot.rotate(Vec3(0, 0, half.z))
-			, Color::BLUE);
+			addCube(view
+				, tr.pos
+				, tr.rot.rotate(Vec3(half.x, 0, 0))
+				, tr.rot.rotate(Vec3(0, half.y, 0))
+				, tr.rot.rotate(Vec3(0, 0, half.z))
+				, Color::BLUE);
 
-		return true;
+			return true;
+		}
+
+		return false;
 	}
 
 };
