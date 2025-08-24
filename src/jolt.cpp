@@ -184,6 +184,34 @@ struct JoltModuleImpl : JoltModule {
 
 	const char* getName() const override { return "jolt"; }
 
+	Vec3 getLinearVelocity(EntityRef entity) {
+		Body& body = m_bodies[entity];
+		if (!body.body) return {};
+
+		return toLumix(body.body->GetLinearVelocity());
+	}
+
+	void setLinearVelocity(EntityRef entity, const Vec3& velocity) {
+		Body& body = m_bodies[entity];
+		if (!body.body) return;
+
+		body.body->SetLinearVelocity(toJPH(velocity));
+	}
+
+	void addImpulse(EntityRef entity, const Vec3& impulse) {
+		Body& body = m_bodies[entity];
+		if (!body.body) return;
+
+		body.body->AddImpulse(toJPH(impulse));
+	}
+
+	void addForce(EntityRef entity, const Vec3& force) {
+		Body& body = m_bodies[entity];
+		if (!body.body) return;
+
+		body.body->AddForce(toJPH(force));
+	}
+
 	void serialize(struct OutputMemoryStream& serializer) override {
 		serializer.write(m_bodies.size());
 		for (auto iter = m_bodies.begin(); iter.isValid(); ++iter) {
@@ -728,18 +756,12 @@ struct JoltModuleImpl : JoltModule {
 				.LUMIX_PROP(MeshPath, "Path").resourceAttribute(Model::TYPE)
 			.LUMIX_CMP(Body, "jolt_body", "Jolt / Body")
 				.icon(ICON_FA_VOLLEYBALL_BALL)
+				.LUMIX_FUNC(addImpulse)
+				.LUMIX_FUNC(addForce)
+				.LUMIX_FUNC(getLinearVelocity)
+				.LUMIX_FUNC(setLinearVelocity)
 				.LUMIX_ENUM_PROP(DynamicType, "Dynamic").attribute<DynamicTypeEnum>()
 				.LUMIX_ENUM_PROP(Layer, "Layer").attribute<LayerEnum>()
-			/*.LUMIX_FUNC_EX(JoltModuleImpl::putToSleep, "putToSleep")
-			.LUMIX_FUNC_EX(JoltModuleImpl::getActorSpeed, "getSpeed")
-			.LUMIX_FUNC_EX(JoltModuleImpl::getActorVelocity, "getVelocity")
-			.LUMIX_FUNC_EX(JoltModuleImpl::applyForceToActor, "applyForce")
-			.LUMIX_FUNC_EX(JoltModuleImpl::applyImpulseToActor, "applyImpulse")
-			.LUMIX_FUNC_EX(JoltModuleImpl::addForceAtPos, "addForceAtPos")
-			.LUMIX_PROP(IsTrigger, "Trigger")
-			.LUMIX_PROP(RigidActorCCD, "CCD")
-			.LUMIX_PROP(RigidActorMaterial, "Material").resourceAttribute(PhysicsMaterial::TYPE)
-			*/
 			;
 
 	}
