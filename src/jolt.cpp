@@ -184,6 +184,13 @@ struct JoltModuleImpl : JoltModule {
 
 	const char* getName() const override { return "jolt"; }
 
+	bool isBodyActive(EntityRef entity) {
+		Body& body = m_bodies[entity];
+		if (!body.body) return false;
+
+		return body.body->IsActive();
+	}
+
 	Vec3 getLinearVelocity(EntityRef entity) {
 		Body& body = m_bodies[entity];
 		if (!body.body) return {};
@@ -202,7 +209,8 @@ struct JoltModuleImpl : JoltModule {
 		Body& body = m_bodies[entity];
 		if (!body.body) return;
 
-		body.body->AddImpulse(toJPH(impulse));
+		JPH::BodyInterface& bi = m_jolt_system.GetBodyInterface();
+		bi.AddImpulse(body.body->GetID(), toJPH(impulse));
 	}
 
 	void addForce(EntityRef entity, const Vec3& force) {
@@ -760,6 +768,7 @@ struct JoltModuleImpl : JoltModule {
 				.LUMIX_FUNC(addForce)
 				.LUMIX_FUNC(getLinearVelocity)
 				.LUMIX_FUNC(setLinearVelocity)
+				.prop<&JoltModuleImpl::isBodyActive>("Is active")
 				.LUMIX_ENUM_PROP(DynamicType, "Dynamic").attribute<DynamicTypeEnum>()
 				.LUMIX_ENUM_PROP(Layer, "Layer").attribute<LayerEnum>()
 			;
