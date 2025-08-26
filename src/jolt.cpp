@@ -10,6 +10,7 @@
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
+#include <Jolt/Renderer/DebugRendererSimple.h>
 #include <Jolt/RegisterTypes.h>
 
 #include "core/hash_map.h"
@@ -25,11 +26,13 @@
 #include "imgui/IconsFontAwesome5.h"
 #include "jolt_module.h"
 #include "renderer/model.h"
+#include "renderer/render_module.h"
 
 namespace Lumix {
 
 enum class JoltVersion : i32 {
 	MESHES,
+	BODY_PROPERTIES,
 
 	LATEST
 };
@@ -52,6 +55,26 @@ namespace Layers
 	static constexpr JPH::ObjectLayer MOVING = 1;
 	static constexpr JPH::ObjectLayer NUM_LAYERS = 2;
 };
+
+static JPH::Vec3 toJPH(const Vec3& v) {
+	return {v.x, v.y, v.z};
+}
+
+static JPH::Quat toJPH(const Quat& v) {
+	return {v.x, v.y, v.z, v.w};
+}
+
+static Vec3 toLumix(const JPH::Vec3& v) {
+	return {v.GetX(), v.GetY(), v.GetZ()};
+}
+
+static Color toLumix(const JPH::ColorArg& v) {
+	return Color(v.r, v.g, v.b, v.a);
+}
+
+static Quat toLumix(const JPH::Quat& v) {
+	return {v.GetX(), v.GetY(), v.GetZ(), v.GetW()};
+}
 
 struct BPLayerInterfaceImpl final : JPH::BroadPhaseLayerInterface {
 	BPLayerInterfaceImpl() {
@@ -88,6 +111,22 @@ struct ObjectLayerPairFilterImpl final : JPH::ObjectLayerPairFilter {
 		}
 	}
 };
+
+
+struct JoltDebugRenderer : public JPH::DebugRendererSimple {
+	void DrawLine(JPH::RVec3Arg from, JPH::RVec3Arg to, JPH::ColorArg color) override {
+		if (module) module->addDebugLine(DVec3(toLumix(from)), DVec3(toLumix(to)), toLumix(color));
+	}
+
+	void DrawTriangle(JPH::RVec3Arg inV1, JPH::RVec3Arg inV2, JPH::RVec3Arg inV3, JPH::ColorArg inColor, ECastShadow inCastShadow) override {
+	}
+	
+	void DrawText3D(JPH::RVec3Arg inPosition, const std::string_view &inString, JPH::ColorArg inColor = JPH::Color::sWhite, float inHeight = 0.5f) override {
+	}
+
+	RenderModule* module = nullptr;
+};
+
 
 struct JoltJobSystemProxy : JPH::JobSystemWithBarrier {
 	JoltJobSystemProxy() {
@@ -139,6 +178,11 @@ struct JoltModuleImpl : JoltModule {
 		JPH::ObjectLayer layer = Layers::NON_MOVING;
 		JPH::Body* body = nullptr;
 		JPH::Ref<JPH::Shape> shape;
+		JPH::EMotionQuality motion_quality = JPH::EMotionQuality::LinearCast;
+		float friction = 0.2f;
+		float restitution = 0;
+		float linear_damping = 0.05f;
+		float angular_damping = 0.05f;
 	};
 
 	JoltModuleImpl(Engine& engine, ISystem& system, World& world, IAllocator& allocator)
@@ -166,22 +210,6 @@ struct JoltModuleImpl : JoltModule {
 		}
 	}
 
-	static JPH::Vec3 toJPH(const Vec3& v) {
-		return {v.x, v.y, v.z};
-	}
-
-	static JPH::Quat toJPH(const Quat& v) {
-		return {v.x, v.y, v.z, v.w};
-	}
-
-	static Vec3 toLumix(const JPH::Vec3& v) {
-		return {v.GetX(), v.GetY(), v.GetZ()};
-	}
-
-	static Quat toLumix(const JPH::Quat& v) {
-		return {v.GetX(), v.GetY(), v.GetZ(), v.GetW()};
-	}
-
 	const char* getName() const override { return "jolt"; }
 
 	bool isBodyActive(EntityRef entity) {
@@ -189,6 +217,77 @@ struct JoltModuleImpl : JoltModule {
 		if (!body.body) return false;
 
 		return body.body->IsActive();
+	}
+
+	float getFriction(EntityRef entity) {
+		const Body& body = m_bodies[entity];
+		return body.friction;
+	}
+
+	float getRestitution(EntityRef entity) {
+		const Body& body = m_bodies[entity];
+		return body.restitution;
+	}
+
+	float getLinearDamping(EntityRef entity) {
+		const Body& body = m_bodies[entity];
+		return body.linear_damping;
+	}
+
+	float getAngularDamping(EntityRef entity) {
+		const Body& body = m_bodies[entity];
+		return body.angular_damping;
+	}
+
+	void setLinearDamping(EntityRef entity, float value) {
+		Body& body = m_bodies[entity];
+		body.linear_damping = value;
+		if (body.body) {
+			JPH::MotionProperties* motion_properties = body.body->GetMotionProperties();
+			if (motion_properties) {
+				motion_properties->SetLinearDamping(body.linear_damping);
+			}
+		}
+	}
+
+	void setAngularDamping(EntityRef entity, float value) {
+		Body& body = m_bodies[entity];
+		body.angular_damping = value;
+		if (body.body) {
+			JPH::MotionProperties* motion_properties = body.body->GetMotionProperties();
+			if (motion_properties) {
+				motion_properties->SetAngularDamping(body.linear_damping);
+			}
+		}
+	}
+
+	void setFriction(EntityRef entity, float friction) {
+		Body& body = m_bodies[entity];
+		body.friction = friction;
+		if (body.body) body.body->SetFriction(friction);
+	}
+
+	void setRestitution(EntityRef entity, float restitution) {
+		Body& body = m_bodies[entity];
+		body.restitution = restitution;
+		if (body.body) body.body->SetRestitution(restitution);
+	}
+
+	bool isDiscreteMotion(EntityRef entity) {
+		Body& body = m_bodies[entity];
+		return body.motion_quality == JPH::EMotionQuality::Discrete;
+	}
+	
+	void setDiscreteMotion(EntityRef entity, bool is_descrete) {
+		Body& body = m_bodies[entity];
+		body.motion_quality = is_descrete ? JPH::EMotionQuality::Discrete : JPH::EMotionQuality::LinearCast;
+	}
+
+	float getBodySpeed(EntityRef entity) {
+		Body& body = m_bodies[entity];
+		if (!body.body) return false;
+
+		return body.body->GetLinearVelocity().Length();
 	}
 
 	Vec3 getLinearVelocity(EntityRef entity) {
@@ -227,6 +326,11 @@ struct JoltModuleImpl : JoltModule {
 			const Body& body = iter.value();
 			serializer.write(body.motion_type);
 			serializer.write(body.layer);
+			serializer.write(body.motion_quality);
+			serializer.write(body.friction);
+			serializer.write(body.restitution);
+			serializer.write(body.linear_damping);
+			serializer.write(body.angular_damping);
 		}
 
 		serializer.write(m_boxes.size());
@@ -271,6 +375,14 @@ struct JoltModuleImpl : JoltModule {
 
 			serializer.read(body.motion_type);
 			serializer.read(body.layer);
+
+			if (version > (i32)JoltVersion::BODY_PROPERTIES) {
+				serializer.read(body.motion_quality);
+				serializer.read(body.friction);
+				serializer.read(body.restitution);
+				serializer.read(body.linear_damping);
+				serializer.read(body.angular_damping);
+			}
 		}
 
 		u32 num_boxes;
@@ -364,11 +476,16 @@ struct JoltModuleImpl : JoltModule {
 			body.motion_type,
 			body.layer
 		);
-
+		bcs.mEnhancedInternalEdgeRemoval = true;
+		bcs.mMotionQuality = body.motion_quality;
+		bcs.mFriction = body.friction;
+		bcs.mRestitution = body.restitution;
+		bcs.mLinearDamping = body.linear_damping;
+		bcs.mAngularDamping = body.angular_damping;
 		JPH::BodyInterface& bi = m_jolt_system.GetBodyInterface();
 		body.body = bi.CreateBody(bcs);
 		body.body->SetUserData(entity.index);
-		bi.AddBody(body.body->GetID(), JPH::EActivation::Activate);		
+		bi.AddBody(body.body->GetID(), JPH::EActivation::Activate);
 	}
 	
 	void startGame() {
@@ -378,9 +495,28 @@ struct JoltModuleImpl : JoltModule {
 			Body& body = iter.value();
 			createJoltBody(body, body_entity);
 		}
+		m_debug_renderer.module = (RenderModule*)m_world.getModule("renderer");
 	}
 
 	void stopGame() { m_is_game_running = false; }
+
+	void toggleDebugDraw() override {
+		m_is_debug_draw_enable = !m_is_debug_draw_enable;
+	}
+
+	void drawDebug() {
+		if (!m_is_debug_draw_enable) return;
+
+		JPH::BodyManager::DrawSettings draw_settings;
+		draw_settings.mDrawShape = true;
+		draw_settings.mDrawGetSupportingFace = true;
+		draw_settings.mDrawShapeWireframe = true;
+		draw_settings.mDrawBoundingBox = true;
+		draw_settings.mDrawCenterOfMassTransform = true;
+		draw_settings.mDrawVelocity = true;
+		
+		m_jolt_system.DrawBodies(draw_settings, &m_debug_renderer);
+	}
 
 	void update(float time_delta) override {
 		PROFILE_FUNCTION();
@@ -398,6 +534,8 @@ struct JoltModuleImpl : JoltModule {
 			m_world.setPosition(e, DVec3(toLumix(pos)));
 			m_world.setRotation(e, toLumix(rot));
 		}
+
+		drawDebug();
 	}
 
 	void destroyBody(EntityRef entity) {
@@ -605,85 +743,6 @@ struct JoltModuleImpl : JoltModule {
 		m_world.onComponentCreated(entity, JOLT_BOX_TYPE, this);
 	}
 	
-	const JPH::RotatedTranslatedShape* getShape(EntityRef entity, JPH::EShapeSubType type, u32 idx) const {
-		const Body& body = m_bodies[entity];
-		ASSERT(body.shape.GetPtr());
-		
-		const JPH::Shape* shape = body.shape.GetPtr();
-	
-		ASSERT(shape->GetType() == JPH::EShapeType::Compound);
-
-		const JPH::CompoundShape* compound = (const JPH::CompoundShape*)shape;
-		u32 num = 0;
-		for (JPH::uint i = 0; i < compound->GetNumSubShapes(); ++i) {
-			const JPH::CompoundShape::SubShape& sub_shape = compound->GetSubShape(i);
-			
-			const JPH::Shape* inner_shape = sub_shape.mShape;
-			auto* rot_trans_shape = (const JPH::RotatedTranslatedShape*)inner_shape;
-			inner_shape = rot_trans_shape->GetInnerShape();
-			
-			if (inner_shape->GetSubType() == type) {
-				if (num == idx) return (const JPH::RotatedTranslatedShape*)sub_shape.mShape.GetPtr();
-				++num;
-			}
-		}
-		
-		return nullptr;
-	}
-
-	void replaceShapeTransform(EntityRef entity, u32 idx, const JPH::Vec3& pos, const JPH::Quat& rot, JPH::EShapeSubType type) {
-		Body& body = m_bodies[entity];
-		ASSERT(body.shape.GetPtr());
-		ASSERT(body.body);
-
-		const DVec3 entity_pos = m_world.getPosition(entity);
-		JPH::EMotionType motion_type = body.body->GetMotionType();
-		JPH::ObjectLayer layer = body.body->GetObjectLayer();
-
-		JPH::BodyInterface& body_interface = m_jolt_system.GetBodyInterface();
-		body_interface.RemoveBody(body.body->GetID());
-		body_interface.DestroyBody(body.body->GetID());
-
-		const JPH::CompoundShape* compound = (const JPH::CompoundShape*)body.shape.GetPtr();
-		JPH::MutableCompoundShapeSettings css;
-
-		u32 num = 0;
-		for (JPH::uint i = 0; i < compound->GetNumSubShapes(); ++i) {
-			const JPH::CompoundShape::SubShape& sub_shape = compound->GetSubShape(i);
-			
-			const JPH::Shape* inner_shape = sub_shape.mShape;
-			auto* rot_trans_shape = (const JPH::RotatedTranslatedShape*)inner_shape;
-			inner_shape = rot_trans_shape->GetInnerShape();
-			
-			if (inner_shape->GetSubType() == type) {
-				if (num == idx) {
-					JPH::Ref<JPH::Shape> new_wrapped_shape = new JPH::RotatedTranslatedShape(pos, rot, inner_shape);
-					css.AddShape(sub_shape.GetPositionCOM(), sub_shape.GetRotation(), new_wrapped_shape);
-				} else {
-					css.AddShape(sub_shape.GetPositionCOM(), sub_shape.GetRotation(), sub_shape.mShape);
-				}
-				num++;
-			} else {
-				css.AddShape(sub_shape.GetPositionCOM(), sub_shape.GetRotation(), sub_shape.mShape);
-			}
-		}
-
-		JPH::ShapeSettings::ShapeResult result = css.Create();
-		ASSERT(result.IsValid());
-		body.shape = result.Get();
-
-		JPH::BodyCreationSettings bcs(body.shape, {(float)entity_pos.x, (float)entity_pos.y, (float)entity_pos.z}, JPH::Quat::sIdentity(), motion_type, layer);
-		body.body = body_interface.CreateBody(bcs);
-		body.body->SetUserData(entity.index);
-		body_interface.AddBody(body.body->GetID(), JPH::EActivation::Activate);
-	}
-
-	void setBoxOffsetPosition(EntityRef entity, u32 idx, const Vec3& pos) {
-		const JPH::RotatedTranslatedShape* shape = getShape(entity, JPH::EShapeSubType::Box, idx);
-		const JPH::Quat rotation = shape->GetRotation();
-		replaceShapeTransform(entity, idx, toJPH(pos), rotation, JPH::EShapeSubType::Box);
-	}
-
 	Vec3 getBoxHalfExtents(EntityRef entity) const override {
 		return toLumix(m_boxes[entity]->GetHalfExtent());
 	}
@@ -710,6 +769,13 @@ struct JoltModuleImpl : JoltModule {
 		body_interface.DestroyBody(body.body->GetID());
 		
 		JPH::BodyCreationSettings bcs(shape, {(float)pos.x, (float)pos.y, (float)pos.z}, JPH::Quat::sIdentity(), motion_type, new_layer);
+		bcs.mEnhancedInternalEdgeRemoval = true;
+		bcs.mMotionQuality = body.motion_quality;
+		bcs.mFriction = body.friction;
+		bcs.mRestitution = body.restitution;
+		bcs.mLinearDamping = body.linear_damping;
+		bcs.mAngularDamping = body.angular_damping;
+
 		body.body = body_interface.CreateBody(bcs);
 		body.body->SetUserData(entity.index);
 		body_interface.AddBody(body.body->GetID(), JPH::EActivation::Activate);
@@ -754,6 +820,7 @@ struct JoltModuleImpl : JoltModule {
 		};
 
 		LUMIX_MODULE(JoltModuleImpl, "jolt")
+			.LUMIX_FUNC(toggleDebugDraw)
 			.LUMIX_CMP(Box, "jolt_box", "Jolt / Box")
 				.icon(ICON_FA_BOX)
 				.LUMIX_PROP(BoxHalfExtents, "Half extents")
@@ -769,6 +836,12 @@ struct JoltModuleImpl : JoltModule {
 				.LUMIX_FUNC(getLinearVelocity)
 				.LUMIX_FUNC(setLinearVelocity)
 				.prop<&JoltModuleImpl::isBodyActive>("Is active")
+				.prop<&JoltModuleImpl::getBodySpeed>("Speed")
+				.prop<&JoltModuleImpl::isDiscreteMotion, &JoltModuleImpl::setDiscreteMotion>("Descrete motion")
+				.LUMIX_PROP(Friction, "Friction")
+				.LUMIX_PROP(Restitution, "Restitution")
+				.LUMIX_PROP(LinearDamping, "Linear damping")
+				.LUMIX_PROP(AngularDamping, "Angular damping")
 				.LUMIX_ENUM_PROP(DynamicType, "Dynamic").attribute<DynamicTypeEnum>()
 				.LUMIX_ENUM_PROP(Layer, "Layer").attribute<LayerEnum>()
 			;
@@ -787,12 +860,14 @@ struct JoltModuleImpl : JoltModule {
 	ObjectLayerPairFilterImpl m_object_vs_object_layer_filter;
 	JPH::PhysicsSystem m_jolt_system;
 	bool m_is_game_running = false;
+	bool m_is_debug_draw_enable = false;
 
 	HashMap<EntityRef, Body> m_bodies;
 	HashMap<EntityRef, JPH::Ref<JPH::BoxShape>> m_boxes;
 	HashMap<EntityRef, MeshShape> m_meshes;
 	HashMap<EntityRef, JPH::Ref<JPH::SphereShape>> m_spheres;
 	HashMap<Model*, u32> m_callbacks_ref_count;
+	JoltDebugRenderer m_debug_renderer;
 };
 
 

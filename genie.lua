@@ -10,6 +10,6 @@ if plugin "jolt" then
 		"genie.lua"
 	}
 	includedirs { "external/" }
-	defines { "BUILDING_JOLT" }
+	defines { "BUILDING_JOLT", "JPH_DEBUG_RENDERER" }
 	dynamic_link_plugin { "engine" }
 end

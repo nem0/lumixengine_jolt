@@ -3,6 +3,8 @@
 namespace Lumix {
 
 struct JoltModule : IModule {
+	virtual void toggleDebugDraw() = 0;
+
 	virtual float getSphereRadius(EntityRef entity) const = 0;
 	virtual void setSphereRadius(EntityRef entity, float radius) = 0;
 	

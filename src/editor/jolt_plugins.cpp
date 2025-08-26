@@ -3,6 +3,7 @@
 #include "core/geometry.h"
 #include "core/profiler.h"
 #include "core/string.h"
+#include "editor/action.h"
 #include "editor/studio_app.h"
 #include "editor/world_editor.h"
 #include "engine/component_uid.h"
@@ -15,8 +16,17 @@ static const ComponentType JOLT_BOX_TYPE = reflection::getComponentType("jolt_bo
 static const ComponentType JOLT_SPHERE_TYPE = reflection::getComponentType("jolt_sphere");
 
 struct StudioAppPlugin : StudioApp::IPlugin {
+	StudioAppPlugin(StudioApp& app) : m_app(app) {}
+	
 	void init() override {}
 	const char* getName() const override { return "jolt"; }
+	
+	void update(float time_delta) override {
+		if (m_app.checkShortcut(m_toggle_debug_draw_action, true)) {
+			JoltModule* jolt = (JoltModule*)m_app.getWorldEditor().getWorld()->getModule("jolt");
+			jolt->toggleDebugDraw();
+		}
+	}
 
 	static void addSphere(WorldView& view, const DVec3& center, float radius, Color color) {
 		static const int COLS = 36;
@@ -114,13 +124,15 @@ struct StudioAppPlugin : StudioApp::IPlugin {
 		return false;
 	}
 
+	StudioApp& m_app;
+	Action m_toggle_debug_draw_action{"Jolt", "Debug draw", "Toggle debug draw", "jolt_debug_draw", ""};
 };
 
 LUMIX_STUDIO_ENTRY(jolt)
 {
 	PROFILE_FUNCTION();
 	IAllocator& allocator = app.getAllocator();
-	return LUMIX_NEW(allocator, StudioAppPlugin)();
+	return LUMIX_NEW(allocator, StudioAppPlugin)(app);
 }
 
 }
