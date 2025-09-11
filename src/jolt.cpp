@@ -207,6 +207,9 @@ struct JoltModuleImpl : JoltModule {
 	}
 
 	~JoltModuleImpl() {
+		for (auto iter = m_callbacks_ref_count.begin(); iter.isValid(); ++iter) {
+			iter.key()->getObserverCb().unbind<&JoltModuleImpl::onModelStateChanged>(this);
+		}
 		for (Body& body : m_bodies) {
 			if (!body.body) continue;
 			m_jolt_system.GetBodyInterface().DestroyBody(body.body->GetID());
@@ -532,13 +535,14 @@ struct JoltModuleImpl : JoltModule {
 
 	void stopGame() { m_is_game_running = false; }
 
-	void toggleDebugDraw() override {
-		m_is_debug_draw_enable = !m_is_debug_draw_enable;
+	void enableDebugDraw(bool enable) override {
+		m_is_debug_draw_enable = enable;
 	}
 
 	void drawDebug() {
 		if (!m_is_debug_draw_enable) return;
-
+		
+		PROFILE_FUNCTION();
 		JPH::BodyManager::DrawSettings draw_settings;
 		draw_settings.mDrawShape = true;
 		draw_settings.mDrawGetSupportingFace = true;

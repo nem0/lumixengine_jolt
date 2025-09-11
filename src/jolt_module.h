@@ -13,7 +13,7 @@ enum ObjectLayer : u16 {};
 //@ module JoltModule jolt "Jolt"
 struct JoltModule : IModule {
 	//@ functions
-	virtual void toggleDebugDraw() = 0;
+	virtual void enableDebugDraw(bool enable) = 0;
 	virtual void takeSnapshot() = 0;
 	//@ end
 
