@@ -22,6 +22,10 @@ struct StudioAppPlugin : StudioApp::IPlugin {
 	const char* getName() const override { return "jolt"; }
 	
 	void update(float time_delta) override {
+		if (m_app.checkShortcut(m_save_snapshot_action, true)) {
+			JoltModule* jolt = (JoltModule*)m_app.getWorldEditor().getWorld()->getModule("jolt");
+			jolt->takeSnapshot();
+		}
 		if (m_app.checkShortcut(m_toggle_debug_draw_action, true)) {
 			JoltModule* jolt = (JoltModule*)m_app.getWorldEditor().getWorld()->getModule("jolt");
 			jolt->toggleDebugDraw();
@@ -125,7 +129,8 @@ struct StudioAppPlugin : StudioApp::IPlugin {
 	}
 
 	StudioApp& m_app;
-	Action m_toggle_debug_draw_action{"Jolt", "Debug draw", "Toggle debug draw", "jolt_debug_draw", ""};
+	Action m_toggle_debug_draw_action{ "Jolt", "Debug draw", "Toggle debug draw", "jolt_debug_draw", "" };
+	Action m_save_snapshot_action{"Jolt", "Save snapshot", "Save snapshot", "jolt_save_snapshot", ""};
 };
 
 LUMIX_STUDIO_ENTRY(jolt)

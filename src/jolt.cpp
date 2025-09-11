@@ -9,12 +9,15 @@
 #include <Jolt/Physics/Collision/Shape/MutableCompoundShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Collision/Shape/MeshShape.h>
+#include <Jolt/Physics/PhysicsScene.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Renderer/DebugRendererSimple.h>
 #include <Jolt/RegisterTypes.h>
 
 #include "core/hash_map.h"
 #include "core/job_system.h"
+#include "core/log.h"
+#include "core/os.h"
 #include "core/profiler.h"
 #include "core/stream.h"
 #include "core/string.h"
@@ -212,34 +215,34 @@ struct JoltModuleImpl : JoltModule {
 
 	const char* getName() const override { return "jolt"; }
 
-	bool isBodyActive(EntityRef entity) {
+	bool isBodyActive(EntityRef entity) override {
 		Body& body = m_bodies[entity];
 		if (!body.body) return false;
 
 		return body.body->IsActive();
 	}
 
-	float getFriction(EntityRef entity) {
+	float getFriction(EntityRef entity) override {
 		const Body& body = m_bodies[entity];
 		return body.friction;
 	}
 
-	float getRestitution(EntityRef entity) {
+	float getRestitution(EntityRef entity) override {
 		const Body& body = m_bodies[entity];
 		return body.restitution;
 	}
 
-	float getLinearDamping(EntityRef entity) {
+	float getLinearDamping(EntityRef entity) override {
 		const Body& body = m_bodies[entity];
 		return body.linear_damping;
 	}
 
-	float getAngularDamping(EntityRef entity) {
+	float getAngularDamping(EntityRef entity) override {
 		const Body& body = m_bodies[entity];
 		return body.angular_damping;
 	}
 
-	void setLinearDamping(EntityRef entity, float value) {
+	void setLinearDamping(EntityRef entity, float value) override {
 		Body& body = m_bodies[entity];
 		body.linear_damping = value;
 		if (body.body) {
@@ -250,7 +253,36 @@ struct JoltModuleImpl : JoltModule {
 		}
 	}
 
-	void setAngularDamping(EntityRef entity, float value) {
+	struct StreamOut : JPH::StreamOut {
+		StreamOut(IAllocator& allocator) : blob(allocator) {}
+		void WriteBytes(const void* data, size_t num_bytes) override {
+			failed = !blob.write(data, num_bytes) || failed; 
+		}
+		bool IsFailed() const override { return failed; }
+
+		OutputMemoryStream blob;
+		bool failed = false;
+	};
+
+	void takeSnapshot() {
+		JPH::Ref<JPH::PhysicsScene> scene = new JPH::PhysicsScene();
+		scene->FromPhysicsSystem(&m_jolt_system);
+
+		StreamOut stream(m_allocator);
+		scene->SaveBinaryState(stream, true, true);
+
+		os::OutputFile file;
+		if (file.open("jolt_snapshot.bin")) {
+			if (!file.write(stream.blob.data(), stream.blob.size())) {
+				logError("Failed to write jolt_snapshot.bin");
+			}
+			file.close();
+		}
+		else logError("Failed to write jolt_snapshot.bin");
+
+	}
+
+	void setAngularDamping(EntityRef entity, float value) override {
 		Body& body = m_bodies[entity];
 		body.angular_damping = value;
 		if (body.body) {
@@ -261,43 +293,43 @@ struct JoltModuleImpl : JoltModule {
 		}
 	}
 
-	void setFriction(EntityRef entity, float friction) {
+	void setFriction(EntityRef entity, float friction) override {
 		Body& body = m_bodies[entity];
 		body.friction = friction;
 		if (body.body) body.body->SetFriction(friction);
 	}
 
-	void setRestitution(EntityRef entity, float restitution) {
+	void setRestitution(EntityRef entity, float restitution) override {
 		Body& body = m_bodies[entity];
 		body.restitution = restitution;
 		if (body.body) body.body->SetRestitution(restitution);
 	}
 
-	bool isDiscreteMotion(EntityRef entity) {
+	bool isDiscreteMotion(EntityRef entity) override {
 		Body& body = m_bodies[entity];
 		return body.motion_quality == JPH::EMotionQuality::Discrete;
 	}
 	
-	void setDiscreteMotion(EntityRef entity, bool is_descrete) {
+	void setDiscreteMotion(EntityRef entity, bool is_descrete) override {
 		Body& body = m_bodies[entity];
 		body.motion_quality = is_descrete ? JPH::EMotionQuality::Discrete : JPH::EMotionQuality::LinearCast;
 	}
 
-	float getBodySpeed(EntityRef entity) {
+	float getBodySpeed(EntityRef entity) override {
 		Body& body = m_bodies[entity];
 		if (!body.body) return false;
 
 		return body.body->GetLinearVelocity().Length();
 	}
 
-	Vec3 getLinearVelocity(EntityRef entity) {
+	Vec3 getLinearVelocity(EntityRef entity) override {
 		Body& body = m_bodies[entity];
 		if (!body.body) return {};
 
 		return toLumix(body.body->GetLinearVelocity());
 	}
 
-	void setLinearVelocity(EntityRef entity, const Vec3& velocity) {
+	void setLinearVelocity(EntityRef entity, const Vec3& velocity) override {
 		Body& body = m_bodies[entity];
 		if (!body.body) return;
 
@@ -312,7 +344,7 @@ struct JoltModuleImpl : JoltModule {
 		bi.AddImpulse(body.body->GetID(), toJPH(impulse));
 	}
 
-	void addForce(EntityRef entity, const Vec3& force) {
+	void addForce(EntityRef entity, const Vec3& force) override {
 		Body& body = m_bodies[entity];
 		if (!body.body) return;
 
@@ -695,7 +727,7 @@ struct JoltModuleImpl : JoltModule {
 		createJoltBody(body, entity);
 	}
 
-	void destroyMesh(EntityRef entity) {
+	void destroyMesh(EntityRef entity) override {
 		auto iter = m_meshes.find(entity);
 		if (!iter.isValid()) return;
 
@@ -706,7 +738,7 @@ struct JoltModuleImpl : JoltModule {
 		m_world.onComponentDestroyed(entity, JOLT_MESH_TYPE, this);
 	}
 
-	void destroyBox(EntityRef entity) {
+	void destroyBox(EntityRef entity) override {
 		auto iter = m_boxes.find(entity);
 		if (!iter.isValid()) return;
 
@@ -717,7 +749,7 @@ struct JoltModuleImpl : JoltModule {
 		m_world.onComponentDestroyed(entity, JOLT_BOX_TYPE, this);
 	}
 
-	void destroySphere(EntityRef entity) {
+	void destroySphere(EntityRef entity) override {
 		auto iter = m_spheres.find(entity);
 		if (!iter.isValid()) return;
 
@@ -728,17 +760,17 @@ struct JoltModuleImpl : JoltModule {
 		m_world.onComponentDestroyed(entity, JOLT_SPHERE_TYPE, this);
 	}
 
-	void createSphere(EntityRef entity) {
+	void createSphere(EntityRef entity) override {
 		m_spheres.insert(entity, new JPH::SphereShape(1));
 		m_world.onComponentCreated(entity, JOLT_SPHERE_TYPE, this);
 	}
 
-	void createMesh(EntityRef entity) {
+	void createMesh(EntityRef entity) override {
 		m_meshes.insert(entity, {});
 		m_world.onComponentCreated(entity, JOLT_MESH_TYPE, this);
 	}
 
-	void createBox(EntityRef entity) {
+	void createBox(EntityRef entity) override {
 		m_boxes.insert(entity, new JPH::BoxShape({1, 1, 1}));
 		m_world.onComponentCreated(entity, JOLT_BOX_TYPE, this);
 	}
@@ -747,14 +779,15 @@ struct JoltModuleImpl : JoltModule {
 		return toLumix(m_boxes[entity]->GetHalfExtent());
 	}
 
-	JPH::ObjectLayer getLayer(EntityRef entity) {
+	ObjectLayer getLayer(EntityRef entity) override {
 		const Body& body = m_bodies[entity];
-		return body.layer;
+		return (ObjectLayer)body.layer;
 	}
 
-	void setLayer(EntityRef entity, JPH::ObjectLayer new_layer) {
+	void setLayer(EntityRef entity, ObjectLayer new_layer) override {
+		ASSERT((u32)new_layer <= 0xffFF);
 		Body& body = m_bodies[entity];
-		body.layer = new_layer;
+		body.layer = (JPH::ObjectLayer)new_layer;
 		
 		if (!body.body) return;
 		if (body.body->GetObjectLayer() == new_layer) return;
@@ -781,13 +814,13 @@ struct JoltModuleImpl : JoltModule {
 		body_interface.AddBody(body.body->GetID(), JPH::EActivation::Activate);
 	}
 
-	void setDynamicType(EntityRef entity, JPH::EMotionType type) {
+	void setDynamicType(EntityRef entity, JPH::EMotionType type) override {
 		Body& body = m_bodies[entity];
 		body.motion_type = type;
 		if (body.body) body.body->SetMotionType(type);
 	}
 
-	JPH::EMotionType getDynamicType(EntityRef entity) {
+	JPH::EMotionType getDynamicType(EntityRef entity) override {
 		const Body& body = m_bodies[entity];
 		return body.motion_type;
 	}
@@ -819,33 +852,7 @@ struct JoltModuleImpl : JoltModule {
 			}
 		};
 
-		LUMIX_MODULE(JoltModuleImpl, "jolt")
-			.LUMIX_FUNC(toggleDebugDraw)
-			.LUMIX_CMP(Box, "jolt_box", "Jolt / Box")
-				.icon(ICON_FA_BOX)
-				.LUMIX_PROP(BoxHalfExtents, "Half extents")
-			.LUMIX_CMP(Sphere, "jolt_sphere", "Jolt / Sphere")
-				.icon(ICON_FA_GLOBE)
-				.LUMIX_PROP(SphereRadius, "Radius")
-			.LUMIX_CMP(Mesh, "jolt_mesh", "Jolt / Mesh")
-				.LUMIX_PROP(MeshPath, "Path").resourceAttribute(Model::TYPE)
-			.LUMIX_CMP(Body, "jolt_body", "Jolt / Body")
-				.icon(ICON_FA_VOLLEYBALL_BALL)
-				.LUMIX_FUNC(addImpulse)
-				.LUMIX_FUNC(addForce)
-				.LUMIX_FUNC(getLinearVelocity)
-				.LUMIX_FUNC(setLinearVelocity)
-				.prop<&JoltModuleImpl::isBodyActive>("Is active")
-				.prop<&JoltModuleImpl::getBodySpeed>("Speed")
-				.prop<&JoltModuleImpl::isDiscreteMotion, &JoltModuleImpl::setDiscreteMotion>("Descrete motion")
-				.LUMIX_PROP(Friction, "Friction")
-				.LUMIX_PROP(Restitution, "Restitution")
-				.LUMIX_PROP(LinearDamping, "Linear damping")
-				.LUMIX_PROP(AngularDamping, "Angular damping")
-				.LUMIX_ENUM_PROP(DynamicType, "Dynamic").attribute<DynamicTypeEnum>()
-				.LUMIX_ENUM_PROP(Layer, "Layer").attribute<LayerEnum>()
-			;
-
+		#include "jolt_module.gen.h"
 	}
 
 	IAllocator& m_allocator;
