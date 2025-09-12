@@ -401,6 +401,8 @@ struct JoltModuleImpl : JoltModule {
 		}
 		u32 num_bodies;
 		serializer.read(num_bodies);
+		Array<EntityRef> bodies(m_allocator); // TODO temporary allocation
+		if (m_is_game_running) bodies.reserve(num_bodies);
 		for (u32 i = 0; i < num_bodies; ++i) {
 			EntityRef e;
 			serializer.read(e);
@@ -418,6 +420,8 @@ struct JoltModuleImpl : JoltModule {
 				serializer.read(body.linear_damping);
 				serializer.read(body.angular_damping);
 			}
+
+			if (m_is_game_running) bodies.push(mapped);
 		}
 
 		u32 num_boxes;
@@ -459,6 +463,12 @@ struct JoltModuleImpl : JoltModule {
 			auto iter = m_meshes.insert(mapped, {});
 			setMeshPath(mapped, path);
 			m_world.onComponentCreated(mapped, JOLT_MESH_TYPE, this);
+		}
+
+		if (m_is_game_running) {
+			for (EntityRef e : bodies) {
+				createJoltBody(m_bodies[e], e);
+			}
 		}
 	}
 
