@@ -45,6 +45,7 @@ struct JoltModule : IModule {
 	//@ end
 
 	//@ component Body icon ICON_FA_VOLLEYBALL_BALL id jolt_body
+	virtual void initBody(EntityRef entity) = 0;						//@ function alias init
 	virtual void addImpulse(EntityRef entity, const Vec3& impulse) = 0; //@ function
 	virtual void addForce(EntityRef entity, const Vec3& force) = 0; //@ function
 	virtual float getBodySpeed(EntityRef entity) = 0;
@@ -59,12 +60,14 @@ struct JoltModule : IModule {
 	virtual void setLinearDamping(EntityRef entity, float value) = 0;		//@ setter LinearDamping
 	virtual float getAngularDamping(EntityRef entity) = 0;					//@ getter AngularDamping
 	virtual void setAngularDamping(EntityRef entity, float value) = 0;		//@ setter AngularDamping
-	virtual JPH::EMotionType getDynamicType(EntityRef entity) = 0;				//@ getter DynamicType dynenum DynamicType
-	virtual void setDynamicType(EntityRef entity, JPH::EMotionType type) = 0;	//@ setter DynamicType
-	virtual ObjectLayer getLayer(EntityRef entity) = 0;							//@ getter Layer dynenum Layer
-	virtual void setLayer(EntityRef entity, ObjectLayer new_layer) = 0;			//@ setter Layer
-	virtual Vec3 getLinearVelocity(EntityRef entity) = 0;						//@ getter LinearVelocity
-	virtual void setLinearVelocity(EntityRef entity, const Vec3& velocity) = 0;	//@ setter LinearVelocity
+	virtual JPH::EMotionType getDynamicType(EntityRef entity) = 0;					//@ getter DynamicType dynenum DynamicType
+	virtual void setDynamicType(EntityRef entity, JPH::EMotionType type) = 0;		//@ setter DynamicType
+	virtual ObjectLayer getLayer(EntityRef entity) = 0;								//@ getter Layer dynenum Layer
+	virtual void setLayer(EntityRef entity, ObjectLayer new_layer) = 0;				//@ setter Layer
+	virtual Vec3 getLinearVelocity(EntityRef entity) = 0;							//@ getter LinearVelocity
+	virtual void setLinearVelocity(EntityRef entity, const Vec3& velocity) = 0;		//@ setter LinearVelocity
+	virtual Vec3 getAngularVelocity(EntityRef entity) = 0;							//@ getter AngularVelocity
+	virtual void setAngularVelocity(EntityRef entity, const Vec3& velocity) = 0;	//@ setter AngularVelocity
 	//@ end
 };
 

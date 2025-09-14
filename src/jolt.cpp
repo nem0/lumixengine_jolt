@@ -204,15 +204,26 @@ struct JoltModuleImpl : JoltModule {
 		const u32 MAX_BODY_PAIRS = 1024;
 		const u32 MAX_CONTACT_CONSTRAINTS = 1024;
 		m_jolt_system.Init(MAX_BODIES, 0, MAX_BODY_PAIRS, MAX_CONTACT_CONSTRAINTS, m_broad_phase_layer_interface, m_object_vs_broadphase_layer_filter, m_object_vs_object_layer_filter);
+		JPH::PhysicsSettings settings = m_jolt_system.GetPhysicsSettings();
+		// https://github.com/jrouwe/JoltPhysics/issues/1686
+		settings.mUseBodyPairContactCache = false;
+		m_jolt_system.SetPhysicsSettings(settings);
 	}
 
 	~JoltModuleImpl() {
 		for (auto iter = m_callbacks_ref_count.begin(); iter.isValid(); ++iter) {
 			iter.key()->getObserverCb().unbind<&JoltModuleImpl::onModelStateChanged>(this);
 		}
+
+		for (MeshShape& m : m_meshes) {
+			if (m.model) m.model->decRefCount();
+		}
+
+		JPH::BodyInterface& bi = m_jolt_system.GetBodyInterface();
 		for (Body& body : m_bodies) {
 			if (!body.body) continue;
-			m_jolt_system.GetBodyInterface().DestroyBody(body.body->GetID());
+			bi.RemoveBody(body.body->GetID());
+			bi.DestroyBody(body.body->GetID());
 		}
 	}
 
@@ -337,6 +348,24 @@ struct JoltModuleImpl : JoltModule {
 		if (!body.body) return;
 
 		body.body->SetLinearVelocity(toJPH(velocity));
+	}
+
+	Vec3 getAngularVelocity(EntityRef entity) override {
+		Body& body = m_bodies[entity];
+		if (!body.body) return {};
+
+		return toLumix(body.body->GetAngularVelocity());
+	}
+
+	void setAngularVelocity(EntityRef entity, const Vec3& velocity) override {
+		Body& body = m_bodies[entity];
+		if (!body.body) return;
+
+		body.body->SetAngularVelocity(toJPH(velocity));
+	}
+
+	void initBody(EntityRef entity) override {
+		createJoltBody(m_bodies[entity], entity);
 	}
 
 	void addImpulse(EntityRef entity, const Vec3& impulse) {
@@ -498,6 +527,7 @@ struct JoltModuleImpl : JoltModule {
 				css.AddShape(toJPH(Vec3(local_tr.pos)), toJPH(local_tr.rot), sphere_iter.value());
 			}
 			if (mesh_iter.isValid() && mesh_iter.value().model && mesh_iter.value().model->isReady()) {
+				// TODO handle not ready
 				MeshShape& shape = mesh_iter.value();
 				if (!shape.shape) createJoltMesh(shape);
 				const Transform local_tr = m_world.getLocalTransform(child);
@@ -675,12 +705,24 @@ struct JoltModuleImpl : JoltModule {
 		shape.shape = (JPH::MeshShape*)result.Get().GetPtr();
 	}
 
+	EntityPtr findParentBody(EntityRef child) {
+		if (m_bodies.find(child).isValid()) return child;
+		EntityPtr parent = m_world.getParent(child);
+		if (!parent.isValid()) return INVALID_ENTITY;
+		if (m_bodies.find(*parent).isValid()) return parent;
+		return INVALID_ENTITY;
+	}
+
 	void onModelStateChanged(Resource::State old_state, Resource::State new_state, Resource& resource) {
 		if (old_state != Resource::State::READY && new_state == Resource::State::READY) {
-			for (MeshShape& shape : m_meshes) {
+			for (auto iter = m_meshes.begin(); iter.isValid(); ++iter) {
+				MeshShape& shape = iter.value();
 				if (shape.model != &resource) continue;
 
 				createJoltMesh(shape);
+				EntityRef entity = iter.key();
+				EntityPtr body = findParentBody(entity);
+				if (body.isValid()) recreateJoltBody(*body);
 			}
 		}
 	}
@@ -748,6 +790,8 @@ struct JoltModuleImpl : JoltModule {
 		EntityPtr body_entity = getBodyEntity(entity);
 		if (body_entity.isValid()) recreateJoltBody(*body_entity);
 
+		Model* model = iter.value().model;
+		if (model) model->decRefCount();
 		m_meshes.erase(entity);
 		m_world.onComponentDestroyed(entity, JOLT_MESH_TYPE, this);
 	}

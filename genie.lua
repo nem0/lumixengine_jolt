@@ -12,4 +12,9 @@ if plugin "jolt" then
 	includedirs { "external/" }
 	defines { "BUILDING_JOLT", "JPH_DEBUG_RENDERER" }
 	dynamic_link_plugin { "engine" }
+
+	configuration { "Debug" }
+	defines { "JPH_DEBUG" }
+	
+	configuration {}
 end
